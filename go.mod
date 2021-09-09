@@ -2,6 +2,8 @@ module github.com/tikv/client-go/v2
 
 go 1.15
 
+replace github.com/tikv/pd v1.1.0-beta.0.20210323121136-78679e5e209d => github.com/JmPotato/pd v1.1.0-beta.0.20210914054650-59358bb8ff46
+
 require (
 	github.com/cznic/mathutil v0.0.0-20181122101859-297441e03548
 	github.com/dgryski/go-farm v0.0.0-20190423205320-6a90982ecee2
@@ -18,8 +20,8 @@ require (
 	github.com/pingcap/errors v0.11.5-0.20201126102027-b0a155152ca3
 	github.com/pingcap/failpoint v0.0.0-20210316064728-7acb0f0a3dfd
 	github.com/pingcap/goleveldb v0.0.0-20191226122134-f82aafb29989
-	github.com/pingcap/kvproto v0.0.0-20210806074406-317f69fb54b4
-	github.com/pingcap/log v0.0.0-20210317133921-96f4fcab92a4
+	github.com/pingcap/kvproto v0.0.0-20210819164333-bd5706b9d9f2
+	github.com/pingcap/log v0.0.0-20210625125904-98ed8e2eb1c7
 	github.com/pingcap/parser v0.0.0-20210525032559-c37778aff307
 	github.com/prometheus/client_golang v1.5.1
 	github.com/prometheus/client_model v0.2.0

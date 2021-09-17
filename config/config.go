@@ -39,6 +39,7 @@ import (
 	"net/url"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/pingcap/errors"
 	"github.com/tikv/client-go/v2/internal/logutil"
@@ -101,13 +102,15 @@ func DefaultConfig() Config {
 // PDClient is the config for PD client.
 type PDClient struct {
 	// PDServerTimeout is the max time which PD client will wait for the PD server in seconds.
-	PDServerTimeout uint `toml:"pd-server-timeout" json:"pd-server-timeout"`
+	PDServerTimeout         uint          `toml:"pd-server-timeout" json:"pd-server-timeout"`
+	MaxTSOBatchWaitInterval time.Duration `toml:"max-tso-batch-wait-interval" json:"max-tso-batch-wait-interval"`
 }
 
 // DefaultPDClient returns the default configuration for PDClient
 func DefaultPDClient() PDClient {
 	return PDClient{
-		PDServerTimeout: 3,
+		PDServerTimeout:         3,
+		MaxTSOBatchWaitInterval: time.Duration(0),
 	}
 }
 

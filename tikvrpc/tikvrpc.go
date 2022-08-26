@@ -72,6 +72,7 @@ const (
 	CmdTxnHeartBeat
 	CmdCheckTxnStatus
 	CmdCheckSecondaryLocks
+	CmdFlashbackToVersion
 
 	CmdRawGet CmdType = 256 + iota
 	CmdRawBatchGet
@@ -137,6 +138,8 @@ func (t CmdType) String() string {
 		return "ScanLock"
 	case CmdResolveLock:
 		return "ResolveLock"
+	case CmdFlashbackToVersion:
+		return "FlashbackToVersion"
 	case CmdGC:
 		return "GC"
 	case CmdDeleteRange:
@@ -324,6 +327,10 @@ func (req *Request) ScanLock() *kvrpcpb.ScanLockRequest {
 // ResolveLock returns ResolveLockRequest in request.
 func (req *Request) ResolveLock() *kvrpcpb.ResolveLockRequest {
 	return req.Req.(*kvrpcpb.ResolveLockRequest)
+}
+
+func (req *Request) FlashbackToVersion() *kvrpcpb.FlashbackToVersionRequest {
+	return req.Req.(*kvrpcpb.FlashbackToVersionRequest)
 }
 
 // GC returns GCRequest in request.
@@ -532,6 +539,8 @@ func (req *Request) ToBatchCommandsRequest() *tikvpb.BatchCommandsRequest_Reques
 		return &tikvpb.BatchCommandsRequest_Request{Cmd: &tikvpb.BatchCommandsRequest_Request_ScanLock{ScanLock: req.ScanLock()}}
 	case CmdResolveLock:
 		return &tikvpb.BatchCommandsRequest_Request{Cmd: &tikvpb.BatchCommandsRequest_Request_ResolveLock{ResolveLock: req.ResolveLock()}}
+	case CmdFlashbackToVersion:
+		return &tikvpb.BatchCommandsRequest_Request{Cmd: &tikvpb.BatchCommandsRequest_Request_FlashbackToVersion{FlashbackToVersion: req.FlashbackToVersion()}}
 	case CmdGC:
 		return &tikvpb.BatchCommandsRequest_Request{Cmd: &tikvpb.BatchCommandsRequest_Request_GC{GC: req.GC()}}
 	case CmdDeleteRange:
@@ -599,6 +608,8 @@ func FromBatchCommandsResponse(res *tikvpb.BatchCommandsResponse_Response) (*Res
 		return &Response{Resp: res.ScanLock}, nil
 	case *tikvpb.BatchCommandsResponse_Response_ResolveLock:
 		return &Response{Resp: res.ResolveLock}, nil
+	case *tikvpb.BatchCommandsResponse_Response_FlashbackToVersion:
+		return &Response{Resp: res.FlashbackToVersion}, nil
 	case *tikvpb.BatchCommandsResponse_Response_GC:
 		return &Response{Resp: res.GC}, nil
 	case *tikvpb.BatchCommandsResponse_Response_DeleteRange:
@@ -695,6 +706,8 @@ func SetContext(req *Request, region *metapb.Region, peer *metapb.Peer) error {
 		req.ScanLock().Context = ctx
 	case CmdResolveLock:
 		req.ResolveLock().Context = ctx
+	case CmdFlashbackToVersion:
+		req.FlashbackToVersion().Context = ctx
 	case CmdGC:
 		req.GC().Context = ctx
 	case CmdDeleteRange:
@@ -807,6 +820,10 @@ func GenRegionErrorResp(req *Request, e *errorpb.Error) (*Response, error) {
 		}
 	case CmdResolveLock:
 		p = &kvrpcpb.ResolveLockResponse{
+			RegionError: e,
+		}
+	case CmdFlashbackToVersion:
+		p = &kvrpcpb.FlashbackToVersionResponse{
 			RegionError: e,
 		}
 	case CmdGC:
@@ -971,6 +988,8 @@ func CallRPC(ctx context.Context, client tikvpb.TikvClient, req *Request) (*Resp
 		resp.Resp, err = client.KvScanLock(ctx, req.ScanLock())
 	case CmdResolveLock:
 		resp.Resp, err = client.KvResolveLock(ctx, req.ResolveLock())
+	case CmdFlashbackToVersion:
+		resp.Resp, err = client.KvFlashbackToVersion(ctx, req.FlashbackToVersion())
 	case CmdGC:
 		resp.Resp, err = client.KvGC(ctx, req.GC())
 	case CmdDeleteRange:
@@ -1215,7 +1234,8 @@ func (req *Request) IsTxnWriteRequest() bool {
 		req.Type == CmdCheckSecondaryLocks ||
 		req.Type == CmdCleanup ||
 		req.Type == CmdTxnHeartBeat ||
-		req.Type == CmdResolveLock {
+		req.Type == CmdResolveLock ||
+		req.Type == CmdFlashbackToVersion {
 		return true
 	}
 	return false

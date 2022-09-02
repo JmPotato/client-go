@@ -29,7 +29,7 @@ import (
 )
 
 const (
-	CONCURRENCY                  = 8
+	CONCURRENCY                  = 32
 	flashbackToVersionMaxBackoff = 100000
 )
 
@@ -38,11 +38,12 @@ func (s *KVStore) FlashbackToVersion(
 	ctx context.Context,
 	version uint64,
 	startKey []byte, endKey []byte,
+	concurrency int,
 ) (err error) {
 	return rangetask.NewRangeTaskRunner(
 		"flashback-to-version-runner",
 		s,
-		CONCURRENCY,
+		concurrency,
 		func(ctx context.Context, r kv.KeyRange) (rangetask.TaskStat, error) {
 			return s.flashbackToVersion(ctx, version, r)
 		},

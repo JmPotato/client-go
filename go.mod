@@ -38,11 +38,11 @@ require (
 	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c
 	golang.org/x/sys v0.0.0-20220209214540-3681064d5158 // indirect
 	golang.org/x/text v0.3.7 // indirect
-	google.golang.org/appengine v1.4.0
 	google.golang.org/genproto v0.0.0-20210624195500-8bfb893ecb84 // indirect
 	google.golang.org/grpc v1.43.0
 )
 
-replace github.com/pingcap/kvproto => github.com/tidblabs/kvproto v0.0.0-20220717141846-8f5445390a32
-
-replace github.com/tikv/pd/client => github.com/tidblabs/pd/client v0.0.0-20220717143221-433427468de1
+replace (
+	github.com/pingcap/kvproto => github.com/JmPotato/kvproto v0.0.0-20221212065645-bfd92aa5ebb6
+	github.com/tikv/pd/client => github.com/JmPotato/pd/client v0.0.0-20221212065850-de3eb251a284
+)

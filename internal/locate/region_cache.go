@@ -1505,58 +1505,38 @@ func (c *RegionCache) LocateEndKey(bo *retry.Backoffer, key []byte) (*KeyLocatio
 	}, nil
 }
 
+// Mock that the region cache is not used to benchmark the performance of region retrieval.
 func (c *RegionCache) findRegionByKey(bo *retry.Backoffer, key []byte, isEndKey bool) (r *Region, err error) {
 	var expired bool
-	r, expired = c.searchCachedRegionByKey(key, isEndKey)
+	// r, expired = c.searchCachedRegionByKey(key, isEndKey)
 	tag := "ByKey"
 	if isEndKey {
 		tag = "ByEndKey"
 	}
-	if r == nil || expired {
-		// load region when it is not exists or expired.
-		observeLoadRegion(tag, r, expired, 0)
-		lr, err := c.loadRegion(bo, key, isEndKey, opt.WithAllowFollowerHandle())
+	// load region when it is not exists or expired.
+	observeLoadRegion(tag, r, expired, 0)
+	lr, err := c.loadRegion(bo, key, isEndKey, opt.WithAllowFollowerHandle())
+	if err != nil {
+		// no region data, return error if failure.
+		return nil, err
+	}
+	logutil.Eventf(bo.GetCtx(), "load region %d from pd, due to cache-miss", lr.GetID())
+	r = lr
+	c.mu.Lock()
+	stale := !c.insertRegionToCache(r, true, true)
+	c.mu.Unlock()
+	// just retry once, it won't bring much overhead.
+	if stale {
+		observeLoadRegion(tag+":Retry", r, expired, 0)
+		lr, err = c.loadRegion(bo, key, isEndKey)
 		if err != nil {
 			// no region data, return error if failure.
 			return nil, err
 		}
-		logutil.Eventf(bo.GetCtx(), "load region %d from pd, due to cache-miss", lr.GetID())
 		r = lr
 		c.mu.Lock()
-		stale := !c.insertRegionToCache(r, true, true)
+		c.insertRegionToCache(r, true, true)
 		c.mu.Unlock()
-		// just retry once, it won't bring much overhead.
-		if stale {
-			observeLoadRegion(tag+":Retry", r, expired, 0)
-			lr, err = c.loadRegion(bo, key, isEndKey)
-			if err != nil {
-				// no region data, return error if failure.
-				return nil, err
-			}
-			r = lr
-			c.mu.Lock()
-			c.insertRegionToCache(r, true, true)
-			c.mu.Unlock()
-		}
-	} else if flags := r.resetSyncFlags(needReloadOnAccess | needDelayedReloadReady); flags > 0 {
-		// load region when it be marked as need reload.
-		observeLoadRegion(tag, r, expired, flags)
-		// NOTE: we can NOT use c.loadRegionByID(bo, r.GetID()) here because the new region (loaded by id) is not
-		// guaranteed to contain the key. (ref: https://github.com/tikv/client-go/pull/1299)
-		lr, err := c.loadRegion(bo, key, isEndKey)
-		if err != nil {
-			// ignore error and use old region info.
-			logutil.Logger(bo.GetCtx()).Error("load region failure",
-				zap.String("key", util.HexRegionKeyStr(key)), zap.Error(err),
-				zap.String("encode-key", util.HexRegionKeyStr(c.codec.EncodeRegionKey(key))))
-		} else {
-			logutil.Eventf(bo.GetCtx(), "load region %d from pd, due to need-reload", lr.GetID())
-			reloadOnAccess := flags&needReloadOnAccess > 0
-			r = lr
-			c.mu.Lock()
-			c.insertRegionToCache(r, reloadOnAccess, reloadOnAccess)
-			c.mu.Unlock()
-		}
 	}
 	return r, nil
 }

@@ -197,6 +197,7 @@ func (c *twoPhaseCommitter) buildPrewriteRequest(batch batchMutations, txnSize u
 
 	if c.isOnePC() {
 		req.TryOnePc = true
+		c.onePCRequestSent.Store(true)
 	}
 
 	r := tikvrpc.NewRequest(
@@ -621,6 +622,9 @@ func (handler *prewrite1BatchReqHandler) handleSingleBatchSucceed(reqBegin time.
 				zap.Uint64("startTS", handler.committer.startTS),
 			)
 			metrics.OnePCTxnCounterFallback.Inc()
+			if handler.committer.onePCSkipReason == "" {
+				handler.committer.onePCSkipReason = metrics.OnePCReasonServerFallback
+			}
 			handler.committer.setOnePC(false)
 			handler.committer.setAsyncCommit(false)
 		} else {

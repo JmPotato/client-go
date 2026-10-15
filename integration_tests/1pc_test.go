@@ -39,8 +39,10 @@ import (
 	"testing"
 
 	"github.com/pingcap/failpoint"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/suite"
 	tikverr "github.com/tikv/client-go/v2/error"
+	"github.com/tikv/client-go/v2/kv"
 	"github.com/tikv/client-go/v2/metrics"
 	"github.com/tikv/client-go/v2/oracle"
 	"github.com/tikv/client-go/v2/tikv"
@@ -197,12 +199,15 @@ func (s *testOnePCSuite) Test1PCDisallowMultiRegion() {
 	keys := [][]byte{s.key(keyNames[0]), s.key(keyNames[1]), s.key(keyNames[2]), s.key(keyNames[3])}
 	values := []string{"v0", "v1", "v2", "v3"}
 
+	onePC := onePCDecision(metrics.OnePCResultOnePC, "")
+	regrouped := onePCDecision(metrics.OnePCResultFallback, metrics.OnePCReasonMultiRegion)
 	err := txn.Set(keys[0], []byte(values[0]))
 	s.Nil(err)
 	err = txn.Set(keys[3], []byte(values[3]))
 	s.Nil(err)
 	err = txn.Commit(context.Background())
 	s.Nil(err)
+	s.Equal(onePC+1, onePCDecision(metrics.OnePCResultOnePC, ""))
 
 	// 1PC doesn't work if it affects multiple regions.
 	loc, err := s.store.GetRegionCache().LocateKey(s.bo, keys[2])
@@ -221,6 +226,19 @@ func (s *testOnePCSuite) Test1PCDisallowMultiRegion() {
 	s.False(txn.GetCommitter().IsOnePC())
 	s.Equal(txn.GetCommitter().GetOnePCCommitTS(), uint64(0))
 	s.Greater(txn.GetCommitter().GetCommitTS(), txn.StartTS())
+	// The Region cache still had the merged Region, so a 1PC request was sent
+	// before the epoch error made the client regroup into two Regions.
+	s.Equal(regrouped+1, onePCDecision(metrics.OnePCResultFallback, metrics.OnePCReasonMultiRegion))
+
+	// With the Region cache up to date, the split is seen when grouping and no
+	// 1PC request is sent.
+	firstGrouping := onePCDecision(metrics.OnePCResultNotAttempted, metrics.OnePCReasonMultiRegion)
+	txn = s.begin1PC()
+	s.Nil(txn.Set(keys[1], []byte(values[1])))
+	s.Nil(txn.Set(keys[2], []byte(values[2])))
+	s.Nil(txn.Commit(context.Background()))
+	s.False(txn.GetCommitter().IsOnePC())
+	s.Equal(firstGrouping+1, onePCDecision(metrics.OnePCResultNotAttempted, metrics.OnePCReasonMultiRegion))
 
 	ver, err := s.store.CurrentTimestamp(oracle.GlobalTxnScope)
 	s.Nil(err)
@@ -274,8 +292,13 @@ func (s *testOnePCSuite) Test1PCWithMultiDC() {
 	s.True(globalTxn.GetCommitter().IsOnePC())
 }
 
+func onePCDecision(result, reason string) float64 {
+	return testutil.ToFloat64(metrics.TiKVOnePCDecisionCounter.WithLabelValues(result, reason, metrics.LblGeneral, metrics.OnePCOutcomeOK))
+}
+
 func (s *testOnePCSuite) TestTxnCommitCounter() {
 	initial := metrics.GetTxnCommitCounter()
+	disabled := onePCDecision(metrics.OnePCResultNotAttempted, metrics.OnePCReasonDisabled)
 
 	// 2PC
 	txn := s.begin()
@@ -288,6 +311,7 @@ func (s *testOnePCSuite) TestTxnCommitCounter() {
 	s.Equal(diff.TwoPC, int64(1))
 	s.Equal(diff.AsyncCommit, int64(0))
 	s.Equal(diff.OnePC, int64(0))
+	s.Equal(disabled+1, onePCDecision(metrics.OnePCResultNotAttempted, metrics.OnePCReasonDisabled))
 
 	// AsyncCommit
 	txn = s.beginAsyncCommit()
@@ -325,7 +349,45 @@ func (s *testOnePCSuite) TestFailWithUndeterminedResult() {
 		// it will make the prewrite in 1pc fail.
 		`1*return("undeterminedResult")->return("")`,
 	))
+	failed := testutil.ToFloat64(metrics.TiKVOnePCDecisionCounter.WithLabelValues(
+		metrics.OnePCResultOnePC, "", metrics.LblGeneral, metrics.OnePCOutcomeUnknown))
 	err := txn.Commit(context.Background())
 	s.NotNil(err)
 	s.True(tikverr.IsErrorUndetermined(err))
+	// An undetermined commit is not counted as a successful 1PC transaction.
+	s.Equal(failed+1, testutil.ToFloat64(metrics.TiKVOnePCDecisionCounter.WithLabelValues(
+		metrics.OnePCResultOnePC, "", metrics.LblGeneral, metrics.OnePCOutcomeUnknown)))
+}
+
+func (s *testOnePCSuite) Test1PCDecisionBatchSizeAndError() {
+	if *withTiKV {
+		s.T().Skip("depends on mock store failpoints")
+	}
+	// A single-Region write set larger than one prewrite batch never sends a
+	// 1PC request.
+	batchSize := onePCDecision(metrics.OnePCResultNotAttempted, metrics.OnePCReasonBatchSize)
+	txn := s.begin1PC()
+	big := make([]byte, kv.TxnCommitBatchSize.Load())
+	s.Nil(txn.Set(s.key("batch_k1"), big))
+	s.Nil(txn.Set(s.key("batch_k2"), big))
+	s.Nil(txn.Commit(context.Background()))
+	s.False(txn.GetCommitter().IsOnePC())
+	s.Equal(batchSize+1, onePCDecision(metrics.OnePCResultNotAttempted, metrics.OnePCReasonBatchSize))
+
+	// A failed 1PC commit is counted with outcome=error, not as a success.
+	decision := func() float64 {
+		return testutil.ToFloat64(metrics.TiKVOnePCDecisionCounter.WithLabelValues(
+			metrics.OnePCResultOnePC, "", metrics.LblGeneral, metrics.OnePCOutcomeError))
+	}
+	failed, ok := decision(), onePCDecision(metrics.OnePCResultOnePC, "")
+	txn = s.begin1PC()
+	s.Nil(txn.Set(s.key("error_k"), []byte("v1")))
+	// A later transaction commits the same key first, so the 1PC prewrite
+	// meets a write conflict.
+	other := s.begin()
+	s.Nil(other.Set(s.key("error_k"), []byte("v2")))
+	s.Nil(other.Commit(context.Background()))
+	s.NotNil(txn.Commit(context.Background()))
+	s.Equal(failed+1, decision())
+	s.Equal(ok, onePCDecision(metrics.OnePCResultOnePC, ""))
 }

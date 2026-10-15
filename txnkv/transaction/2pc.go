@@ -178,6 +178,16 @@ type twoPhaseCommitter struct {
 
 	hasTriedAsyncCommit bool
 	hasTriedOnePC       bool
+	// onePCSkipReason records why 1PC was not attempted, or why an attempted
+	// 1PC fell back to the normal commit procedure. It is reported once per
+	// transaction by the 1PC decision metric.
+	onePCSkipReason string
+	// onePCRequestSent records whether a prewrite request with TryOnePc was
+	// built for sending; it does not prove the request reached the server. It
+	// separates commits that gave up a built 1PC request (the server turned it
+	// down, or the mutations were regrouped on retry) from commits that never
+	// built one.
+	onePCRequestSent atomic.Bool
 
 	binlog BinlogExecutor
 
@@ -888,7 +898,7 @@ func (c *twoPhaseCommitter) doActionOnMutations(bo *retry.Backoffer, action twoP
 
 	// This is redundant since `doActionOnGroupMutations` will still split groups into batches and
 	// check the number of batches. However we don't want the check fail after any code changes.
-	c.checkOnePCFallBack(action, len(groups))
+	c.checkOnePCFallBack(action, len(groups), metrics.OnePCReasonMultiRegion)
 
 	return c.doActionOnGroupMutations(bo, action, groups)
 }
@@ -1041,7 +1051,7 @@ func (c *twoPhaseCommitter) doActionOnGroupMutations(bo *retry.Backoffer, action
 	_, actionIsPessimisticLock := action.(actionPessimisticLock)
 	_, actionIsPrewrite := action.(actionPrewrite)
 
-	c.checkOnePCFallBack(action, len(batchBuilder.allBatches()))
+	c.checkOnePCFallBack(action, len(batchBuilder.allBatches()), metrics.OnePCReasonBatchSize)
 
 	var err error
 	if val, err := util.EvalFailpoint("skipKeyReturnOK"); err == nil {
@@ -1610,19 +1620,27 @@ func (c *twoPhaseCommitter) checkAsyncCommit() bool {
 
 // checkOnePC checks if 1PC protocol is available for current transaction.
 func (c *twoPhaseCommitter) checkOnePC() bool {
-	if c.hasSharedLocks {
-		return false
-	}
-	// Disable 1PC in local transactions
-	if c.txn.GetScope() != oracle.GlobalTxnScope {
-		return false
-	}
-	// Disable 1PC for transaction when commitTSUpperBoundCheck is set.
-	if c.txn.commitTSUpperBoundCheck != nil {
-		return false
-	}
+	return c.onePCIneligibleReason() == ""
+}
 
-	return !c.shouldWriteBinlog() && c.txn.enable1PC
+// onePCIneligibleReason returns why 1PC is not available for the current
+// transaction, or "" if it is.
+func (c *twoPhaseCommitter) onePCIneligibleReason() string {
+	switch {
+	case c.hasSharedLocks:
+		return metrics.OnePCReasonSharedLock
+	// Disable 1PC in local transactions
+	case c.txn.GetScope() != oracle.GlobalTxnScope:
+		return metrics.OnePCReasonLocalScope
+	// Disable 1PC for transaction when commitTSUpperBoundCheck is set.
+	case c.txn.commitTSUpperBoundCheck != nil:
+		return metrics.OnePCReasonCommitTSUpperBound
+	case c.shouldWriteBinlog():
+		return metrics.OnePCReasonBinlog
+	case !c.txn.enable1PC:
+		return metrics.OnePCReasonDisabled
+	}
+	return ""
 }
 
 func (c *twoPhaseCommitter) needLinearizability() bool {
@@ -1653,12 +1671,43 @@ func (c *twoPhaseCommitter) setOnePC(val bool) {
 	}
 }
 
-func (c *twoPhaseCommitter) checkOnePCFallBack(action twoPhaseCommitAction, batchCount int) {
+// checkOnePCFallBack disables 1PC when the prewrite is split into more than
+// one batch. reason tells whether the split comes from Region boundaries or
+// from the batch size limit.
+func (c *twoPhaseCommitter) checkOnePCFallBack(action twoPhaseCommitAction, batchCount int, reason string) {
 	if _, ok := action.(actionPrewrite); ok {
 		if batchCount > 1 {
+			if c.isOnePC() && c.onePCSkipReason == "" {
+				c.onePCSkipReason = reason
+			}
 			c.setOnePC(false)
 		}
 	}
+}
+
+// reportOnePCDecision reports, once per transaction commit, whether 1PC was
+// used and why not, and whether the commit succeeded.
+func (c *twoPhaseCommitter) reportOnePCDecision(err error) {
+	scope := metrics.LblGeneral
+	if c.txn.isInternal() {
+		scope = metrics.LblInternal
+	}
+	outcome := metrics.OnePCOutcomeOK
+	switch {
+	case err == nil:
+	case c.getUndeterminedErr() != nil || errors.Is(err, tikverr.ErrResultUndetermined):
+		outcome = metrics.OnePCOutcomeUnknown
+	default:
+		outcome = metrics.OnePCOutcomeError
+	}
+	result, reason := metrics.OnePCResultNotAttempted, c.onePCSkipReason
+	switch {
+	case c.isOnePC():
+		result, reason = metrics.OnePCResultOnePC, ""
+	case c.onePCRequestSent.Load():
+		result = metrics.OnePCResultFallback
+	}
+	metrics.TiKVOnePCDecisionCounter.WithLabelValues(result, reason, scope, outcome).Inc()
 }
 
 const (
@@ -1742,6 +1791,7 @@ func (c *twoPhaseCommitter) execute(ctx context.Context) (err error) {
 	c.minCommitTSMgr.elevateWriteAccess(twoPCAccess)
 	var binlogSkipped bool
 	defer func() {
+		c.reportOnePCDecision(err)
 		if c.isOnePC() {
 			// The error means the 1PC transaction failed.
 			if err != nil {
@@ -1796,6 +1846,12 @@ func (c *twoPhaseCommitter) execute(ctx context.Context) (err error) {
 		c.setAsyncCommit(false)
 		c.setOnePC(false)
 	}
+	switch {
+	case c.txn.isPipelined:
+		c.onePCSkipReason = metrics.OnePCReasonPipelined
+	case c.hasSharedLocks:
+		c.onePCSkipReason = metrics.OnePCReasonSharedLock
+	}
 	if !c.txn.isPipelined && !c.hasSharedLocks {
 		// Check async commit is available or not.
 		if c.checkAsyncCommit() {
@@ -1804,10 +1860,12 @@ func (c *twoPhaseCommitter) execute(ctx context.Context) (err error) {
 			c.hasTriedAsyncCommit = true
 		}
 		// Check if 1PC is enabled.
-		if c.checkOnePC() {
+		if reason := c.onePCIneligibleReason(); reason == "" {
 			commitTSMayBeCalculated = true
 			c.setOnePC(true)
 			c.hasTriedOnePC = true
+		} else {
+			c.onePCSkipReason = reason
 		}
 	}
 

@@ -97,6 +97,7 @@ var (
 	TiKVTwoPCTxnCounter                            *prometheus.CounterVec
 	TiKVAsyncCommitTxnCounter                      *prometheus.CounterVec
 	TiKVOnePCTxnCounter                            *prometheus.CounterVec
+	TiKVOnePCDecisionCounter                       *prometheus.CounterVec
 	TiKVStoreLimitErrorCounter                     *prometheus.CounterVec
 	TiKVGRPCConnTransientFailureCounter            *prometheus.CounterVec
 	TiKVPanicCounter                               *prometheus.CounterVec
@@ -687,6 +688,15 @@ func initMetrics(namespace, subsystem string, constLabels prometheus.Labels) {
 			ConstLabels: constLabels,
 		}, []string{LblType})
 
+	TiKVOnePCDecisionCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace:   namespace,
+			Subsystem:   subsystem,
+			Name:        "one_pc_decision_total",
+			Help:        "Counter of transaction commits by 1PC decision: one_pc (the commit was decided as 1PC; with outcome=error it may have failed before any request was sent), fallback (a TryOnePc prewrite request was built and then given up, by the server or by regrouping on retry) or not_attempted (no TryOnePc request was built), with the reason, scope (general or internal) and outcome (ok, error or unknown). It is not a count of RPCs.",
+			ConstLabels: constLabels,
+		}, []string{LblResult, LblReason, LblScope, LblOutcome})
+
 	TiKVStoreLimitErrorCounter = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace:   namespace,
@@ -1181,6 +1191,7 @@ func RegisterMetrics() {
 	prometheus.MustRegister(TiKVTwoPCTxnCounter)
 	prometheus.MustRegister(TiKVAsyncCommitTxnCounter)
 	prometheus.MustRegister(TiKVOnePCTxnCounter)
+	prometheus.MustRegister(TiKVOnePCDecisionCounter)
 	prometheus.MustRegister(TiKVStoreLimitErrorCounter)
 	prometheus.MustRegister(TiKVGRPCConnTransientFailureCounter)
 	prometheus.MustRegister(TiKVPanicCounter)
